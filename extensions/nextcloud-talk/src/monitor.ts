@@ -43,28 +43,62 @@ function parseWebhookPayload(body: string): NextcloudTalkWebhookPayload | null {
   }
 }
 
+/**
+ * Try to parse the object.content field as JSON.
+ * For system messages (file shares, etc.), Nextcloud Talk sends content as
+ * a JSON string: {"message": "{file}", "parameters": {"file": {...}}}
+ * For regular messages, content is plain text.
+ */
+function parseContentJson(content: string): {
+  message: string;
+  parameters: Record<string, Record<string, unknown>>;
+} | null {
+  if (!content || !content.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed === "object" && parsed !== null && "message" in parsed) {
+      return {
+        message: String(parsed.message ?? ""),
+        parameters: (parsed.parameters as Record<string, Record<string, unknown>>) ?? {},
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function payloadToInboundMessage(
   payload: NextcloudTalkWebhookPayload,
 ): NextcloudTalkInboundMessage {
   // Payload doesn't indicate DM vs room; mark as group and let inbound handler refine.
   const isGroupChat = true;
-  const params = payload.object.messageParameters;
+
+  // For system messages (type "Activity"), content is JSON-encoded with
+  // message text and rich object parameters (file metadata, etc.).
+  // For regular messages (type "Create"), content is plain text.
+  const contentJson = parseContentJson(payload.object.content);
+  const params = contentJson?.parameters;
 
   // Extract file attachment if present
   const fileParam = params?.file;
   const file = fileParam
     ? {
-        id: String(fileParam.id),
-        name: fileParam.name,
-        path: fileParam.path ?? "",
-        mimetype: fileParam.mimetype ?? "application/octet-stream",
-        size: fileParam.size ?? 0,
-        link: fileParam.link,
+        id: String(fileParam.id ?? ""),
+        name: String(fileParam.name ?? ""),
+        path: String(fileParam.path ?? ""),
+        mimetype: String(fileParam.mimetype ?? "application/octet-stream"),
+        size: Number(fileParam.size ?? 0),
+        link: fileParam.link ? String(fileParam.link) : undefined,
       }
     : undefined;
 
-  // For file shares, content is often "{file}" placeholder — use file name as fallback text
-  let text = payload.object.content || payload.object.name || "";
+  // Determine message text:
+  // - Regular messages: use content directly
+  // - System messages: use parsed message field (may be "{file}" placeholder)
+  let text = contentJson
+    ? contentJson.message
+    : payload.object.content || payload.object.name || "";
   if (file && (text === "{file}" || !text.trim())) {
     text = `[Attached file: ${file.name}]`;
   }
@@ -144,7 +178,8 @@ export function createNextcloudTalkWebhookServer(opts: NextcloudTalkWebhookServe
         return;
       }
 
-      if (payload.type !== "Create") {
+      // Accept "Create" (regular messages) and "Activity" (system messages like file shares)
+      if (payload.type !== "Create" && payload.type !== "Activity") {
         res.writeHead(200);
         res.end();
         return;

@@ -109,24 +109,14 @@ export type NextcloudTalkObject = {
   id: string;
   /** Message text (same as content for text/plain). */
   name: string;
-  /** Message content. */
+  /**
+   * Message content. For regular messages this is plain text.
+   * For system messages (file shares, etc.) this is a JSON-encoded string:
+   * {"message": "{file}", "parameters": {"file": {...}}}
+   */
   content: string;
   /** Media type of the content. */
   mediaType: string;
-  /** Rich object parameters (file shares, mentions, etc). */
-  messageParameters?: Record<
-    string,
-    {
-      type: string;
-      id: string;
-      name: string;
-      path?: string;
-      link?: string;
-      mimetype?: string;
-      size?: number;
-      [key: string]: unknown;
-    }
-  >;
 };
 
 /** Target conversation/room. */
@@ -138,9 +128,13 @@ export type NextcloudTalkTarget = {
   name: string;
 };
 
-/** Incoming webhook payload from Nextcloud Talk. */
+/**
+ * Incoming webhook payload from Nextcloud Talk.
+ * Regular chat messages arrive with type "Create".
+ * System messages (file shares, etc.) arrive with type "Activity".
+ */
 export type NextcloudTalkWebhookPayload = {
-  type: "Create" | "Update" | "Delete";
+  type: "Create" | "Update" | "Delete" | "Activity";
   actor: NextcloudTalkActor;
   object: NextcloudTalkObject;
   target: NextcloudTalkTarget;
@@ -164,7 +158,7 @@ export type NextcloudTalkInboundMessage = {
   mediaType: string;
   timestamp: number;
   isGroupChat: boolean;
-  /** Attached file info extracted from messageParameters. */
+  /** Attached file info extracted from message content parameters. */
   file?: {
     id: string;
     name: string;
