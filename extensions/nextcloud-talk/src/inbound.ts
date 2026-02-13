@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import {
   createReplyPrefixOptions,
   logInboundDrop,
@@ -27,26 +28,47 @@ async function downloadNextcloudFile(params: {
   apiPassword: string;
   filePath: string;
   maxBytes?: number;
+  log?: (msg: string) => void;
 }): Promise<{ content: string; truncated: boolean } | null> {
-  const { baseUrl, apiUser, apiPassword, filePath, maxBytes = 100_000 } = params;
-  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-  const url = `${baseUrl}/remote.php/dav/files/${apiUser}/${encodedPath}`;
+  const { baseUrl, apiUser, apiPassword, filePath, maxBytes = 100_000, log } = params;
+  const cleanPath = filePath.replace(/^\/+/, "");
   const auth = Buffer.from(`${apiUser}:${apiPassword}`).toString("base64");
 
-  try {
-    const res = await fetch(url, {
-      headers: { Authorization: `Basic ${auth}` },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    const truncated = bytes.length > maxBytes;
-    const slice = truncated ? bytes.slice(0, maxBytes) : bytes;
-    return { content: new TextDecoder().decode(slice), truncated };
-  } catch {
-    return null;
+  // Try the path as-is first, then with Talk/ prefix (shared files land in Talk/ folder)
+  const candidates = [cleanPath];
+  if (!cleanPath.startsWith("Talk/")) {
+    candidates.push(`Talk/${cleanPath}`);
   }
+
+  for (const candidate of candidates) {
+    const encodedPath = candidate.split("/").map(encodeURIComponent).join("/");
+    const url = `${baseUrl}/remote.php/dav/files/${apiUser}/${encodedPath}`;
+
+    log?.(`nextcloud-talk: trying file download from ${url}`);
+
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Basic ${auth}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        log?.(`nextcloud-talk: ${url} returned HTTP ${res.status}`);
+        continue;
+      }
+      const buf = await res.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      log?.(`nextcloud-talk: downloaded ${bytes.length} bytes from ${candidate}`);
+      const truncated = bytes.length > maxBytes;
+      const slice = truncated ? bytes.slice(0, maxBytes) : bytes;
+      return { content: new TextDecoder().decode(slice), truncated };
+    } catch (err) {
+      log?.(
+        `nextcloud-talk: file download error for ${candidate}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return null;
 }
 
 async function deliverNextcloudTalkReply(params: {
@@ -101,14 +123,20 @@ export async function handleNextcloudTalkInbound(params: {
   // Download file content if a file attachment is present
   let fileContent = "";
   if (message.file && account.config.apiUser && account.config.baseUrl) {
-    const apiPassword =
-      account.config.apiPassword ??
-      (account.config.apiPasswordFile
-        ? await import("node:fs/promises")
-            .then((fs) => fs.readFile(account.config.apiPasswordFile!, "utf-8"))
-            .then((s) => s.trim())
-            .catch(() => "")
-        : "");
+    let apiPassword = account.config.apiPassword ?? "";
+    if (!apiPassword && account.config.apiPasswordFile) {
+      try {
+        apiPassword = (await readFile(account.config.apiPasswordFile, "utf-8")).trim();
+      } catch (err) {
+        runtime.error?.(
+          `nextcloud-talk: failed to read apiPasswordFile ${account.config.apiPasswordFile}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    runtime.log?.(
+      `nextcloud-talk: file attachment detected: ${message.file.name} (${message.file.mimetype}, path=${message.file.path}, passwordLen=${apiPassword.length})`,
+    );
 
     if (apiPassword) {
       const isText =
@@ -123,13 +151,18 @@ export async function handleNextcloudTalkInbound(params: {
           apiUser: account.config.apiUser,
           apiPassword,
           filePath: message.file.path,
+          log: (msg) => runtime.log?.(msg),
         });
         if (result) {
           fileContent = `\n\n--- File: ${message.file.name} ---\n${result.content}${result.truncated ? "\n[... truncated]" : ""}\n--- End of file ---`;
+        } else {
+          runtime.error?.(`nextcloud-talk: file download returned null for ${message.file.path}`);
         }
       } else {
         fileContent = `\n\n[Binary file attached: ${message.file.name} (${message.file.mimetype}, ${message.file.size} bytes)]`;
       }
+    } else {
+      runtime.error?.("nextcloud-talk: no apiPassword available, cannot download file");
     }
   }
 
