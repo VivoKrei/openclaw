@@ -21,6 +21,34 @@ import { sendMessageNextcloudTalk } from "./send.js";
 
 const CHANNEL_ID = "nextcloud-talk" as const;
 
+async function downloadNextcloudFile(params: {
+  baseUrl: string;
+  apiUser: string;
+  apiPassword: string;
+  filePath: string;
+  maxBytes?: number;
+}): Promise<{ content: string; truncated: boolean } | null> {
+  const { baseUrl, apiUser, apiPassword, filePath, maxBytes = 100_000 } = params;
+  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+  const url = `${baseUrl}/remote.php/dav/files/${apiUser}/${encodedPath}`;
+  const auth = Buffer.from(`${apiUser}:${apiPassword}`).toString("base64");
+
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const truncated = bytes.length > maxBytes;
+    const slice = truncated ? bytes.slice(0, maxBytes) : bytes;
+    return { content: new TextDecoder().decode(slice), truncated };
+  } catch {
+    return null;
+  }
+}
+
 async function deliverNextcloudTalkReply(params: {
   payload: { text?: string; mediaUrls?: string[]; mediaUrl?: string; replyToId?: string };
   roomToken: string;
@@ -66,9 +94,46 @@ export async function handleNextcloudTalkInbound(params: {
   const core = getNextcloudTalkRuntime();
 
   const rawBody = message.text?.trim() ?? "";
-  if (!rawBody) {
+  if (!rawBody && !message.file) {
     return;
   }
+
+  // Download file content if a file attachment is present
+  let fileContent = "";
+  if (message.file && account.config.apiUser && account.config.baseUrl) {
+    const apiPassword =
+      account.config.apiPassword ??
+      (account.config.apiPasswordFile
+        ? await import("node:fs/promises")
+            .then((fs) => fs.readFile(account.config.apiPasswordFile!, "utf-8"))
+            .then((s) => s.trim())
+            .catch(() => "")
+        : "");
+
+    if (apiPassword) {
+      const isText =
+        message.file.mimetype.startsWith("text/") ||
+        /\.(md|txt|json|csv|xml|yaml|yml|toml|ini|conf|cfg|log|sh|py|js|ts|html|css)$/i.test(
+          message.file.name,
+        );
+
+      if (isText) {
+        const result = await downloadNextcloudFile({
+          baseUrl: account.config.baseUrl,
+          apiUser: account.config.apiUser,
+          apiPassword,
+          filePath: message.file.path,
+        });
+        if (result) {
+          fileContent = `\n\n--- File: ${message.file.name} ---\n${result.content}${result.truncated ? "\n[... truncated]" : ""}\n--- End of file ---`;
+        }
+      } else {
+        fileContent = `\n\n[Binary file attached: ${message.file.name} (${message.file.mimetype}, ${message.file.size} bytes)]`;
+      }
+    }
+  }
+
+  const bodyWithFile = rawBody + fileContent;
 
   const roomKind = await resolveNextcloudTalkRoomKind({
     account,
@@ -256,15 +321,15 @@ export async function handleNextcloudTalkInbound(params: {
     timestamp: message.timestamp,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: rawBody,
+    body: bodyWithFile,
   });
 
   const groupSystemPrompt = roomConfig?.systemPrompt?.trim() || undefined;
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    BodyForAgent: rawBody,
-    RawBody: rawBody,
+    BodyForAgent: bodyWithFile,
+    RawBody: bodyWithFile,
     CommandBody: rawBody,
     From: isGroup ? `nextcloud-talk:room:${roomToken}` : `nextcloud-talk:${senderId}`,
     To: `nextcloud-talk:${roomToken}`,

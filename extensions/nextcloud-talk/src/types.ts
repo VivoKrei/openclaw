@@ -113,6 +113,20 @@ export type NextcloudTalkObject = {
   content: string;
   /** Media type of the content. */
   mediaType: string;
+  /** Rich object parameters (file shares, mentions, etc). */
+  messageParameters?: Record<
+    string,
+    {
+      type: string;
+      id: string;
+      name: string;
+      path?: string;
+      link?: string;
+      mimetype?: string;
+      size?: number;
+      [key: string]: unknown;
+    }
+  >;
 };
 
 /** Target conversation/room. */
@@ -150,6 +164,15 @@ export type NextcloudTalkInboundMessage = {
   mediaType: string;
   timestamp: number;
   isGroupChat: boolean;
+  /** Attached file info extracted from messageParameters. */
+  file?: {
+    id: string;
+    name: string;
+    path: string;
+    mimetype: string;
+    size: number;
+    link?: string;
+  };
 };
 
 /** Headers sent by Nextcloud Talk webhook. */

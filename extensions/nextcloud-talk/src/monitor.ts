@@ -48,6 +48,26 @@ function payloadToInboundMessage(
 ): NextcloudTalkInboundMessage {
   // Payload doesn't indicate DM vs room; mark as group and let inbound handler refine.
   const isGroupChat = true;
+  const params = payload.object.messageParameters;
+
+  // Extract file attachment if present
+  const fileParam = params?.file;
+  const file = fileParam
+    ? {
+        id: String(fileParam.id),
+        name: fileParam.name,
+        path: fileParam.path ?? "",
+        mimetype: fileParam.mimetype ?? "application/octet-stream",
+        size: fileParam.size ?? 0,
+        link: fileParam.link,
+      }
+    : undefined;
+
+  // For file shares, content is often "{file}" placeholder — use file name as fallback text
+  let text = payload.object.content || payload.object.name || "";
+  if (file && (text === "{file}" || !text.trim())) {
+    text = `[Attached file: ${file.name}]`;
+  }
 
   return {
     messageId: String(payload.object.id),
@@ -55,10 +75,11 @@ function payloadToInboundMessage(
     roomName: payload.target.name,
     senderId: payload.actor.id,
     senderName: payload.actor.name ?? "",
-    text: payload.object.content || payload.object.name || "",
+    text,
     mediaType: payload.object.mediaType || "text/plain",
     timestamp: Date.now(),
     isGroupChat,
+    file,
   };
 }
 
